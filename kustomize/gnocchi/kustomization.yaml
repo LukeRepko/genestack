@@ -1,0 +1,9 @@
+helmGlobals:
+  chartHome: ../../submodules/openstack-helm-infra
+
+helmCharts:
+  - name: gnocchi
+    releaseName: gnocchi
+    valuesFile: base/gnocchi-helm-overrides.yaml
+    namespace: openstack
+    includeCRDs: true
