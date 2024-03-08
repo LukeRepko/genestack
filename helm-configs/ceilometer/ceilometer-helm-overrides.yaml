@@ -1634,6 +1634,10 @@ secrets:
     ceilometer: ceilometer-rabbitmq-user
   oci_image_registry:
     ceilometer: ceilometer-oci-image-registry
+  tls:
+    metering:
+      api:
+        public: ceilometer-tls-public
 
 bootstrap:
   enabled: false
