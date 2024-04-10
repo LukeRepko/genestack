@@ -97,7 +97,6 @@ dependencies:
   static:
     api:
       jobs:
-        - gnocchi-storage-init
         - gnocchi-db-sync
         - gnocchi-ks-endpoints
         - gnocchi-ks-service
@@ -120,7 +119,6 @@ dependencies:
           service: oslo_db_postgresql
     db_sync:
       jobs:
-        - gnocchi-storage-init
         - gnocchi-db-init
         - gnocchi-db-init-indexer
       services:
@@ -142,7 +140,6 @@ dependencies:
           service: identity
     metricd:
       jobs:
-        - gnocchi-storage-init
         - gnocchi-db-sync
         - gnocchi-ks-user
         - gnocchi-ks-service
@@ -154,7 +151,6 @@ dependencies:
           service: metric
     statsd:
       jobs:
-        - gnocchi-storage-init
         - gnocchi-db-sync
         - gnocchi-ks-user
         - gnocchi-ks-service
@@ -166,7 +162,6 @@ dependencies:
           service: metric
     resources_cleaner:
       jobs:
-        - gnocchi-storage-init
         - gnocchi-db-sync
         - gnocchi-ks-user
         - gnocchi-ks-endpoints
@@ -181,7 +176,6 @@ dependencies:
       services: null
     tests:
       jobs:
-        - gnocchi-storage-init
         - gnocchi-db-sync
       services:
         - endpoint: internal
@@ -465,11 +459,11 @@ conf:
     database:
       max_retries: -1
     storage:
-      driver: ceph
-      ceph_pool: gnocchi.metrics
-      ceph_username: gnocchi
-      ceph_keyring: /etc/ceph/ceph.client.gnocchi.keyring
-      ceph_conffile: /etc/ceph/ceph.conf
+      driver: file
+      ceph_pool: null
+      ceph_username: null
+      ceph_keyring: null
+      ceph_conffile: null
       file_basepath: /var/lib/gnocchi
       provided_keyring: null
     indexer:
@@ -665,7 +659,7 @@ manifests:
   job_ks_endpoints: true
   job_ks_service: true
   job_ks_user: true
-  job_storage_init: true
+  job_storage_init: false
   pdb_api: true
   pod_gnocchi_test: false
   secret_db: true
