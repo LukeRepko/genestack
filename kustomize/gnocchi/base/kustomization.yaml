@@ -1,9 +1,45 @@
 resources:
-  - gnocchi-temp-keyring.yaml
   - all.yaml
 
 patches:
-  - path: configmap-bin.yaml
-    target:
-      kind: ConfigMap
-      name: gnocchi-bin
+  - target:
+      kind: Job
+      name: gnocchi-db-sync
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/initContainers
+  - target:
+      kind: Job
+      name: gnocchi-db-sync
+    patch: |-
+      - op: test
+        path: /spec/template/spec/containers/0/name
+        value: gnocchi-db-sync
+      - op: replace
+        path: /spec/template/spec/containers/0/volumeMounts
+        value:
+          - name: pod-tmp
+            mountPath: /tmp
+          - name: gnocchi-etc
+            mountPath: /etc/gnocchi/gnocchi.conf
+            subPath: gnocchi.conf
+          - name: gnocchi-bin
+            mountPath: /tmp/db-sync.sh
+            subPath: db-sync.sh
+  - target:
+      kind: Job
+      name: gnocchi-db-sync
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/volumes
+        value:
+          - name: pod-tmp
+            emptyDir: {}
+          - name: gnocchi-etc
+            secret:
+              secretName: gnocchi-etc
+              defaultMode: 0444
+          - name: gnocchi-bin
+            configMap:
+              name: gnocchi-bin
+              defaultMode: 0555
