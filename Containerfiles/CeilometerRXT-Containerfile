@@ -19,7 +19,7 @@ RUN apt update && \
     libvirt-dev
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10 && \
     pip install \
-    "ceilometer @ git+https://opendev.org/openstack/ceilometer.git@${CEILOMETER_VERSION}" \
+    "ceilometer @ git+https://github.com/LukeRepko/ceilometer.git@${CEILOMETER_VERSION}" \
     "libvirt-python"
 RUN ln -s /usr/bin/python3 /usr/bin/python && \
     adduser ceilometer --disabled-password && \

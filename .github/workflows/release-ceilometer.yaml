@@ -21,9 +21,10 @@ on:
       buildVersion:
         description: 'Set version to build'
         required: true
-        default: 'stable/2024.1'
+        default: '2024.1.debug'
         type: choice
         options:
+          - 2024.1.debug
           - stable/2024.1
           - master
 
