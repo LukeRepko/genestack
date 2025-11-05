@@ -1,0 +1,133 @@
+apiVersion: clickhouse.altinity.com/v1
+kind: ClickHouseInstallation
+metadata:
+  name: ch
+  namespace: clickhouse
+spec:
+  taskID: "1"
+
+  configuration:
+    # Use Keeper for replication
+    zookeeper:
+      nodes:
+        - host: keeper-keeper
+          port: 2181
+
+    users:
+      # Disable dangerous defaults; create reader/writer explicitly.
+      default/readonly: 1
+
+      writer/password_sha256_hex:
+        valueFrom:
+          secretKeyRef:
+            name: clickhouse-db-passwords
+            key: writer_password_sha256
+      writer/profile: default
+      writer/quota: default
+      writer/networks/ip: "::/0"
+
+      reader/password_sha256_hex:
+        valueFrom:
+          secretKeyRef:
+            name: clickhouse-db-passwords
+            key: reader_password_sha256
+      reader/profile: readonly
+      reader/quota: default
+      reader/networks/ip: "::/0"
+
+    profiles:
+      readonly/readonly: 1
+
+    clusters:
+      - name: main
+        layout:
+          shardsCount: 1
+          replicasCount: 1
+        templates:
+          podTemplate: ch-pod
+          volumeClaimTemplate: ch-data
+
+    # Create DB + tables for IPFIX rollups on first boot.
+    files:
+      10-init-ipfix.sql: |
+        CREATE DATABASE IF NOT EXISTS ipfix;
+
+        -- Raw hourly rollups coming from edge nodes (per node).
+        CREATE TABLE IF NOT EXISTS ipfix.vip_hourly_node
+        (
+          hour_ts   DateTime,
+          vip       LowCardinality(String),  -- store IP as text to support v4/v6 uniformly
+          dir       LowCardinality(String),  -- 'to' | 'from'
+          bytes     UInt64,
+          packets   UInt64,
+          node      LowCardinality(String)
+        )
+        ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/vip_hourly_node','{replica}')
+        PARTITION BY toYYYYMMDD(hour_ts)
+        ORDER BY (hour_ts, vip, dir, node);
+
+        -- Cluster-wide aggregation (fast to query).
+        CREATE TABLE IF NOT EXISTS ipfix.vip_hourly_mv
+        (
+          hour_ts   DateTime,
+          vip       LowCardinality(String),
+          dir       LowCardinality(String),
+          bytes     UInt64,
+          packets   UInt64
+        )
+        ENGINE = ReplicatedSummingMergeTree('/clickhouse/tables/{shard}/vip_hourly_mv','{replica}')
+        PARTITION BY toYYYYMMDD(hour_ts)
+        ORDER BY (hour_ts, vip, dir);
+
+        -- Materialized View to keep vip_hourly_mv in sync.
+        CREATE MATERIALIZED VIEW IF NOT EXISTS ipfix.vip_hourly_mv__mv
+        TO ipfix.vip_hourly_mv
+        AS
+        SELECT
+          hour_ts,
+          vip,
+          dir,
+          sum(bytes)   AS bytes,
+          sum(packets) AS packets
+        FROM ipfix.vip_hourly_node
+        GROUP BY hour_ts, vip, dir;
+
+  templates:
+    podTemplates:
+      - name: ch-pod
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                    - key: node-role.kubernetes.io/worker
+                      operator: In
+                      values:
+                      - worker
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      clickhouse.altinity.com/chi: ch
+                  topologyKey: "kubernetes.io/hostname"
+          containers:
+            - name: clickhouse
+              # Injected by envsubst in install script from helm-chart-versions.yaml
+              image: ${CLICKHOUSE_SERVER_IMAGE}
+              imagePullPolicy: IfNotPresent
+              ports:
+                - name: http
+                  containerPort: 8123
+                - name: native
+                  containerPort: 9000
+                - name: inter
+                  containerPort: 9009
+    volumeClaimTemplates:
+      - name: ch-data
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          storageClassName: general
+          resources:
+            requests:
+              storage: 10Gi
