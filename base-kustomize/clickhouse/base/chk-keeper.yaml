@@ -1,0 +1,47 @@
+apiVersion: clickhouse-keeper.altinity.com/v1
+kind: ClickHouseKeeperInstallation
+metadata:
+  name: keeper
+  namespace: clickhouse
+spec:
+  configuration:
+    clusters:
+      - name: ck
+        layout:
+          replicasCount: 1
+  templates:
+    podTemplates:
+      - name: keeper-pod
+        spec:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                  - key: node-role.kubernetes.io/worker
+                    operator: In
+                    values:
+                    - worker
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      clickhouse-keeper.altinity.com/chi: keeper
+                  topologyKey: "kubernetes.io/hostname"
+          containers:
+            - name: clickhouse-keeper
+              # Injected by envsubst in install script
+              image: ${CLICKHOUSE_KEEPER_IMAGE}
+              imagePullPolicy: IfNotPresent
+    volumeClaimTemplates:
+      - name: keeper-data
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          storageClassName: general
+          resources:
+            requests:
+              storage: 10Gi
+  defaults:
+    templates:
+      podTemplate: keeper-pod
+      volumeClaimTemplate: keeper-data

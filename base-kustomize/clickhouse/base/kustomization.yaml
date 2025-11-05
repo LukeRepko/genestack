@@ -1,0 +1,7 @@
+---
+sortOptions:
+  order: fifo
+resources:
+  - chk-keeper.yaml
+  - chi-cluster.yaml
+  - svc-clickhouse-http.yaml
