@@ -6,7 +6,7 @@ metadata:
 spec:
   configuration:
     clusters:
-      - name: ck
+      - name: c
         layout:
           replicasCount: 1
   templates:
