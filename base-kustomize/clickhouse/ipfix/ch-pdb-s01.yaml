@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ch-pdb-s01
+  namespace: clickhouse
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      clickhouse.altinity.com/chi: server
+      clickhouse.altinity.com/cluster: ipfix
+      clickhouse.altinity.com/shard: s01
