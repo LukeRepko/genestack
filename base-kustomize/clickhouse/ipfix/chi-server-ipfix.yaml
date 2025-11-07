@@ -1,0 +1,162 @@
+apiVersion: clickhouse.altinity.com/v1
+kind: ClickHouseInstallation
+metadata:
+  name: server
+  namespace: clickhouse
+spec:
+  configuration:
+    # Keeper for replication in this overlay
+    zookeeper:
+      nodes:
+        - host: keeper-keeper
+          port: 2181
+
+    # Override cluster layout to 3 shards × 2 replicas
+    clusters:
+      - name: ipfix
+        layout:
+          shardsCount: 3
+          replicasCount: 2
+        templates:
+          podTemplate: ch-pod
+          volumeClaimTemplate: ch-data
+
+    # Cluster-wide init SQL (replicated engines + distributed + hourly MV)
+    files:
+      10-init-ipfix.sql: |
+        CREATE DATABASE IF NOT EXISTS ipfix ON CLUSTER '{cluster}';
+
+        ----------------------------------------------------------------------
+        -- Replicated VIP hourly schema
+        ----------------------------------------------------------------------
+        CREATE TABLE IF NOT EXISTS ipfix.vip_hourly_node ON CLUSTER '{cluster}'
+        (
+          hour_ts   DateTime,
+          vip       LowCardinality(String),
+          dir       LowCardinality(String),   -- 'to' | 'from'
+          bytes     UInt64,
+          packets   UInt64,
+          node      LowCardinality(String)
+        )
+        ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/vip_hourly_node','{replica}')
+        PARTITION BY toYYYYMMDD(hour_ts)
+        ORDER BY (hour_ts, vip, dir, node);
+
+        CREATE TABLE IF NOT EXISTS ipfix.vip_hourly_mv ON CLUSTER '{cluster}'
+        (
+          hour_ts   DateTime,
+          vip       LowCardinality(String),
+          dir       LowCardinality(String),
+          bytes     UInt64,
+          packets   UInt64
+        )
+        ENGINE = ReplicatedSummingMergeTree('/clickhouse/tables/{shard}/vip_hourly_mv','{replica}')
+        PARTITION BY toYYYYMMDD(hour_ts)
+        ORDER BY (hour_ts, vip, dir);
+
+        CREATE MATERIALIZED VIEW IF NOT EXISTS ipfix.vip_hourly_mv__mv ON CLUSTER '{cluster}'
+        TO ipfix.vip_hourly_mv
+        AS
+        SELECT
+          hour_ts,
+          vip,
+          dir,
+          sum(bytes)   AS bytes,
+          sum(packets) AS packets
+        FROM ipfix.vip_hourly_node
+        GROUP BY hour_ts, vip, dir;
+
+        ----------------------------------------------------------------------
+        -- Replicated flows + distributed table (replica-aware)
+        ----------------------------------------------------------------------
+        CREATE TABLE IF NOT EXISTS ipfix.flows_local ON CLUSTER '{cluster}'
+        (
+          flow_start   DateTime64(3),
+          flow_end     DateTime64(3),
+          fip          IPv6,
+          src_ip       IPv6,
+          dst_ip       IPv6,
+          src_port     UInt16,
+          dst_port     UInt16,
+          proto        UInt8,
+          bytes        UInt64,
+          packets      UInt64,
+          exporter_id  LowCardinality(String)
+        )
+        ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/flows_local','{replica}')
+        PARTITION BY toDate(flow_start)
+        ORDER BY (fip, flow_start, src_ip, dst_ip, src_port, dst_port, proto)
+        SETTINGS index_granularity = 8192;
+
+        CREATE TABLE IF NOT EXISTS ipfix.flows_dist ON CLUSTER '{cluster}'
+        AS ipfix.flows_local
+        ENGINE = Distributed('{cluster}', 'ipfix', 'flows_local', cityHash64(fip))
+        SETTINGS internal_replication = 1;
+
+        -- Hourly rollup by FIP
+        CREATE TABLE IF NOT EXISTS ipfix.flows_by_fip_1h ON CLUSTER '{cluster}'
+        (
+          ts       DateTime,
+          fip      IPv6,
+          bytes    UInt64,
+          packets  UInt64
+        )
+        ENGINE = SummingMergeTree
+        PARTITION BY toDate(ts)
+        ORDER BY (fip, ts);
+
+        CREATE MATERIALIZED VIEW IF NOT EXISTS ipfix.mv_flows_by_fip_1h ON CLUSTER '{cluster}'
+        TO ipfix.flows_by_fip_1h
+        AS
+        SELECT
+          toStartOfHour(flow_start) AS ts,
+          fip,
+          sum(bytes)   AS bytes,
+          sum(packets) AS packets
+        FROM ipfix.flows_local
+        GROUP BY ts, fip;
+
+  templates:
+    podTemplates:
+      - name: ch-pod
+        spec:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                  - key: node-role.kubernetes.io/worker
+                    operator: In
+                    values:
+                    - worker
+
+          # Prefer spreading across nodes cluster-wide
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        clickhouse.altinity.com/chi: server
+                    topologyKey: kubernetes.io/hostname
+
+          containers:
+            - name: clickhouse
+              image: ${CLICKHOUSE_SERVER_IMAGE}
+              imagePullPolicy: IfNotPresent
+              ports:
+                - name: http
+                  containerPort: 8123
+                - name: native
+                  containerPort: 9000
+                - name: inter
+                  containerPort: 9009
+
+    volumeClaimTemplates:
+      - name: ch-data
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          storageClassName: general
+          resources:
+            requests:
+              storage: 10Gi
