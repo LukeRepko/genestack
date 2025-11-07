@@ -26,7 +26,7 @@ GLOBAL_OVERRIDES_DIR="${GENESTACK_OVERRIDES_DIR}/helm-configs/global_overrides"
 
 # Read the desired chart version from VERSION_FILE
 VERSION_FILE="${GENESTACK_OVERRIDES_DIR}/helm-chart-versions.yaml"
-KUSTOMIZE_DIR="/etc/genestack/kustomize/clickhouse/overlay"
+KUSTOMIZE_DIR="${GENESTACK_OVERRIDES_DIR}/kustomize/clickhouse/overlay"
 OP_RELEASE="altinity-operator"
 
 need() { command -v "$1" >/dev/null || { echo "Missing required command: $1" >&2; exit 1; }; }
@@ -168,10 +168,6 @@ export CLICKHOUSE_KEEPER_IMAGE="${CH_KEEPER_IMAGE}"
 echo "==> Applying ClickHouse Keeper + Cluster (kustomize + envsubst)"
 # We envsubst only image placeholders present in manifests.
 kubectl kustomize "${KUSTOMIZE_DIR}" | envsubst '${CLICKHOUSE_SERVER_IMAGE} ${CLICKHOUSE_KEEPER_IMAGE}' | kubectl apply -n "${SERVICE_NAMESPACE}" -f -
-
-echo "==> Waiting for ClickHouse cluster pods (CHI=ch) to be Ready"
-sleep 5  # wait a few seconds for stateful set to be created
-kubectl wait -n clickhouse --for=jsonpath='{.status.readyReplicas}'=1 statefulset/chi-ch-main-0-0 --timeout=10m
 
 echo "==> Service endpoint (HTTP 8123)"
 kubectl -n "${SERVICE_NAMESPACE}" get svc clickhouse-http -o wide

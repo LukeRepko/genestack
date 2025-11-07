@@ -2,6 +2,5 @@
 sortOptions:
   order: fifo
 resources:
-  - chk-keeper.yaml
-  - chi-cluster.yaml
+  - chi-server-base.yaml
   - svc-clickhouse-http.yaml
