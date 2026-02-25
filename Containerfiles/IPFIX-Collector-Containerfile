@@ -1,0 +1,28 @@
+FROM python:3.13-alpine
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    bash \
+    ca-certificates \
+    tzdata \
+    curl \
+    nfdump \
+    nfdump-tools
+
+# Install Python dependencies for rollup script
+RUN pip install --no-cache-dir \
+    requests \
+    urllib3
+
+# Create flow directory
+RUN mkdir -p /var/lib/ipfix /var/lib/ipfix/processed && \
+    chmod 755 /var/lib/ipfix /var/lib/ipfix/processed
+
+# Add non-root user
+RUN adduser -D -u 1000 ipfix
+
+WORKDIR /var/lib/ipfix
+
+USER ipfix
+
+ENTRYPOINT ["/bin/bash"]
