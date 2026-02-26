@@ -23,6 +23,18 @@ ipfix:
     database: "ipfix"
     table: "vip_hourly_node"
     secretName: "ipfix-clickhouse-creds"
+    # ClickHouse cluster name (must match ClickHouseInstallation cluster name)
+    clusterName: "ipfix"
+    
+    # Schema initialization job configuration
+    initSchema:
+      enabled: true
+      # ClickHouse client image for running schema init
+      image: "clickhouse/clickhouse-client:24.8"
+      # ClickHouse host for native protocol (not HTTP)
+      host: "chi-server-ipfix-0-0.clickhouse.svc.cluster.local"
+      # User with CREATE privileges
+      user: "writer"
 
   # Optional: restrict rollup to known VIPs
   vipListConfigMap: ""

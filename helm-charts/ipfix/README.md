@@ -8,6 +8,13 @@ IPFIX flow collection and aggregation for bandwidth telemetry. Collects flows fr
 |-----------|------|-------------|
 | `ipfix-collector` | DaemonSet | Receives IPFIX flows (nfcapd) and rolls up to ClickHouse |
 | `ipfix-ovs-exporter` | DaemonSet | Configures OVS bridges to export IPFIX flows |
+| `ipfix-clickhouse-schema-init` | Job | Initializes ClickHouse database and tables (runs on install/upgrade) |
+
+## Prerequisites
+
+- ClickHouse must be installed and running
+- The `clickhouse-db-passwords` secret must exist in the `clickhouse` namespace
+- Nodes must have the `openstack-network-node: enabled` label
 
 ## Architecture
 
@@ -132,6 +139,24 @@ tcpdump -i lo -n udp port 4739 -c 10
 # If no packets, check OVS IPFIX config and bridge traffic
 ovs-vsctl list IPFIX
 ovs-ofctl dump-flows br-ex | head -10
+```
+
+### ClickHouse Schema Issues
+
+If the `ipfix` database or tables don't exist:
+
+```bash
+# Check if schema init job ran successfully
+kubectl -n ipfix get jobs
+kubectl -n ipfix logs job/ipfix-clickhouse-schema-init
+
+# Re-run schema init by deleting and re-installing
+kubectl -n ipfix delete job ipfix-clickhouse-schema-init
+# Then re-run: bin/install-ipfix.sh
+
+# Or manually verify tables exist
+kubectl -n clickhouse exec -it chi-server-ipfix-0-0-0 -- \
+  clickhouse-client --query "SHOW TABLES FROM ipfix"
 ```
 
 ### ClickHouse Verification
