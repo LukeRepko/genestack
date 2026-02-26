@@ -1,0 +1,6 @@
+apiVersion: v2
+name: ipfix
+description: IPFIX flow collector for bandwidth telemetry
+type: application
+version: 0.1.0
+appVersion: "1.0"
