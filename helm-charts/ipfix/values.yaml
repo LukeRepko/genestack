@@ -1,0 +1,75 @@
+ipfix:
+  namespace: ipfix
+
+  nodeSelector:
+    openstack-network-node: "enabled"
+
+  # nfcapd configuration
+  listenPort: 4739
+  rotateSeconds: 300
+  compress: true
+
+  # Local flow storage on each node (hostPath)
+  # Flows are stored in /var/lib/ipfix on each node
+  # This survives reboots and avoids shared storage bottlenecks
+
+  # Rollup interval (seconds) - how often the sidecar processes flows
+  rollupEverySeconds: 300
+
+  # ClickHouse HTTP endpoint
+  clickhouse:
+    namespace: clickhouse
+    httpUrl: "http://clickhouse-http.clickhouse.svc.cluster.local:8123"
+    database: "ipfix"
+    table: "vip_hourly_node"
+    secretName: "ipfix-clickhouse-creds"
+
+  # Optional: restrict rollup to known VIPs
+  vipListConfigMap: ""
+
+  # S3 archival
+  s3:
+    enabled: false
+    rawBucket: "s3://org-ipfix-raw-dev"
+    prefix: "clusterA/${NODE_NAME}/"
+    secretName: "s3-credentials"
+
+  # Container images
+  images:
+    # Single unified image with nfdump pre-installed
+    collector: "ghcr.io/rackerlabs/genestack/ipfix-collector:1.0.0-alpine"
+    s3: "docker.io/amazon/aws-cli:latest"
+    # OVS exporter needs ovs-vsctl - use Genestack OVS image
+    ovsExporter: "ghcr.io/rackerlabs/genestack-images/ovs:v3.5.1-latest"
+
+  # OVS IPFIX exporter configuration
+  ovs:
+    # Target for IPFIX export (collector address)
+    target: "127.0.0.1:4739"
+    # OVS bridge to export from
+    providerBridge: "br-ex"
+    # IPFIX observation domain ID (identifies this cluster/deployment)
+    obsDomainId: 1001
+    # How often to export active flows (seconds)
+    cacheActiveTimeout: 60
+    # Maximum flows to cache before forced export
+    cacheMaxFlows: 4096
+    # Sampling rate (1 = every packet, 100 = 1 in 100)
+    samplingRate: 1
+
+  # Resource limits
+  resources:
+    nfcapd:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 2000m
+        memory: 2Gi
+    rollup:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: 2000m
+        memory: 2Gi
