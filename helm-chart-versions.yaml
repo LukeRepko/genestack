@@ -21,7 +21,7 @@ charts:
   horizon: 2024.2.264+13651f45-628a320c
   ipfix:
     images:
-      collector: ghcr.io/rackerlabs/genestack/ipfix-collector:1.0.0-alpine
+      collector: ghcr.io/lukerepko/genestack/ipfix-collector:1.0.0-alpine
       s3: docker.io/amazon/aws-cli:latest
       ovsExporter: docker.io/openvswitch/ovs:3.4.1
   ironic: 2024.2.121+13651f45-628a320c

@@ -1,0 +1,37 @@
+ipfix:
+  namespace: ipfix
+
+  # Schedule collectors only on nodes we expect VIP egress on.
+  nodeSelector:
+    openstack-network-node: "enabled"
+
+  # nfcapd
+  listenPort: 4739
+  rotateSeconds: 300
+  compress: true
+
+  # Local flow storage on each node (hostPath: /var/lib/ipfix)
+  # Flows are stored locally on each node, surviving reboots
+  # No shared storage needed - each node processes its own flows
+
+  # Rollup interval (seconds)
+  rollupEverySeconds: 300
+
+  # ClickHouse HTTP endpoint (override here to match your cluster)
+  clickhouse:
+    namespace: clickhouse
+    httpUrl: "http://clickhouse-http.clickhouse.svc.cluster.local:8123"
+    database: "ipfix"
+    table: "vip_hourly_node"
+    # secret name for creds; install script creates if missing
+    secretName: "ipfix-clickhouse-creds"
+
+  # Optional: restrict rollup to known VIPs
+  # (ConfigMap with vips.txt can be added later)
+  vipListConfigMap: ""
+
+  s3:
+    enabled: false
+    rawBucket: "s3://org-ipfix-raw-dev"
+    prefix: "clusterA/${NODE_NAME}/"
+    secretName: "s3-credentials"

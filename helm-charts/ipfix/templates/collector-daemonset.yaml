@@ -1,0 +1,139 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ipfix-collector
+  namespace: {{ .Values.ipfix.namespace }}
+  labels:
+    app: ipfix-collector
+spec:
+  selector:
+    matchLabels:
+      app: ipfix-collector
+  template:
+    metadata:
+      labels:
+        app: ipfix-collector
+    spec:
+      nodeSelector:
+        {{- range $key, $value := .Values.ipfix.nodeSelector }}
+        {{ $key }}: {{ $value | quote }}
+        {{- end }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+      - name: nfcapd
+        image: {{ .Values.ipfix.images.collector }}
+        command: ["/bin/sh", "/scripts/nfcapd-entrypoint.sh"]
+        ports:
+        - name: ipfix
+          containerPort: {{ .Values.ipfix.listenPort }}
+          protocol: UDP
+          hostPort: {{ .Values.ipfix.listenPort }}
+        volumeMounts:
+        - name: flows
+          mountPath: /var/lib/ipfix
+        - name: scripts
+          mountPath: /scripts
+        resources:
+          {{- toYaml .Values.ipfix.resources.nfcapd | nindent 10 }}
+      
+      - name: rollup
+        image: {{ .Values.ipfix.images.collector }}
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          echo "Starting rollup loop (every {{ .Values.ipfix.rollupEverySeconds }}s)"
+          while true; do
+            sleep {{ .Values.ipfix.rollupEverySeconds }}
+            echo "$(date): Running rollup"
+            python3 /scripts/rollup.py || echo "Rollup failed, will retry"
+          done
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: CLICKHOUSE_URL
+          value: {{ .Values.ipfix.clickhouse.httpUrl | quote }}
+        - name: CLICKHOUSE_USER
+          value: "writer"
+        - name: CLICKHOUSE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.ipfix.clickhouse.secretName }}
+              key: password
+        - name: CLICKHOUSE_DATABASE
+          value: {{ .Values.ipfix.clickhouse.database | quote }}
+        - name: CLICKHOUSE_TABLE
+          value: {{ .Values.ipfix.clickhouse.table | quote }}
+        {{- if .Values.ipfix.vipListConfigMap }}
+        - name: VIP_LIST_FILE
+          value: "/etc/vips/vips.txt"
+        {{- end }}
+        volumeMounts:
+        - name: flows
+          mountPath: /var/lib/ipfix
+        - name: scripts
+          mountPath: /scripts
+        {{- if .Values.ipfix.vipListConfigMap }}
+        - name: vip-list
+          mountPath: /etc/vips
+        {{- end }}
+        resources:
+          {{- toYaml .Values.ipfix.resources.rollup | nindent 10 }}
+      
+      {{- if .Values.ipfix.s3.enabled }}
+      - name: s3-archive
+        image: {{ .Values.ipfix.images.s3 }}
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          echo "Starting S3 archival loop (every 3600s)"
+          while true; do
+            sleep 3600
+            echo "$(date): Running S3 archival"
+            /scripts/s3-archive.sh || echo "S3 archival failed, will retry"
+          done
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.ipfix.s3.secretName }}
+              key: access_key_id
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.ipfix.s3.secretName }}
+              key: secret_access_key
+        volumeMounts:
+        - name: flows
+          mountPath: /var/lib/ipfix
+        - name: scripts
+          mountPath: /scripts
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      {{- end }}
+      
+      volumes:
+      - name: flows
+        hostPath:
+          path: /var/lib/ipfix
+          type: DirectoryOrCreate
+      - name: scripts
+        configMap:
+          name: ipfix-collector-scripts
+          defaultMode: 0755
+      {{- if .Values.ipfix.vipListConfigMap }}
+      - name: vip-list
+        configMap:
+          name: {{ .Values.ipfix.vipListConfigMap }}
+      {{- end }}
