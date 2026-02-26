@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ipfix-ovs-exporter
+  namespace: {{ .Values.ipfix.namespace }}
+  labels:
+    app: ipfix-ovs-exporter
