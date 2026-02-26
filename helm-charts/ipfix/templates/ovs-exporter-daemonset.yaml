@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ipfix-ovs-exporter
+  namespace: {{ .Values.ipfix.namespace }}
+  labels:
+    app: ipfix-ovs-exporter
+spec:
+  selector:
+    matchLabels:
+      app: ipfix-ovs-exporter
+  template:
+    metadata:
+      labels:
+        app: ipfix-ovs-exporter
+    spec:
+      hostPID: true
+      hostNetwork: true
+      serviceAccountName: ipfix-ovs-exporter
+      nodeSelector:
+        {{- range $key, $value := .Values.ipfix.nodeSelector }}
+        {{ $key }}: {{ $value | quote }}
+        {{- end }}
+      containers:
+      - name: ovs-config
+        image: {{ .Values.ipfix.images.ovsExporter }}
+        securityContext:
+          privileged: true
+        command: ["/bin/sh", "/scripts/ovs-ipfix-config.sh"]
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: PROVIDER_BRIDGE
+          value: {{ .Values.ipfix.ovs.providerBridge | quote }}
+        - name: IPFIX_TARGET
+          value: {{ .Values.ipfix.ovs.target | quote }}
+        - name: OBS_DOMAIN_ID
+          value: {{ .Values.ipfix.ovs.obsDomainId | quote }}
+        - name: CACHE_ACTIVE_TIMEOUT
+          value: {{ .Values.ipfix.ovs.cacheActiveTimeout | quote }}
+        - name: CACHE_MAX_FLOWS
+          value: {{ .Values.ipfix.ovs.cacheMaxFlows | quote }}
+        - name: SAMPLING_RATE
+          value: {{ .Values.ipfix.ovs.samplingRate | quote }}
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        - name: ovs-run
+          mountPath: /var/run/openvswitch
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      volumes:
+      - name: scripts
+        configMap:
+          name: ipfix-collector-scripts
+          defaultMode: 0755
+      - name: ovs-run
+        hostPath:
+          path: /var/run/openvswitch
+          type: Directory
