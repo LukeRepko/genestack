@@ -8,7 +8,7 @@ metadata:
 spec:
   type: ClusterIP
   selector:
-    clickhouse.altinity.com/chi: ch
+    clickhouse.altinity.com/chi: server
   ports:
     - name: http
       port: 8123

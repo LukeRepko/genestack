@@ -60,7 +60,7 @@ spec:
               requiredDuringSchedulingIgnoredDuringExecution:
                 - labelSelector:
                     matchLabels:
-                      clickhouse.altinity.com/chi: ch
+                      clickhouse.altinity.com/chi: server
                   topologyKey: "kubernetes.io/hostname"
           containers:
             - name: clickhouse
