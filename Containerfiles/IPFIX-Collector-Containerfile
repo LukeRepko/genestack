@@ -6,8 +6,7 @@ RUN apk add --no-cache \
     ca-certificates \
     tzdata \
     curl \
-    nfdump \
-    nfdump-tools
+    nfdump
 
 # Install Python dependencies for rollup script
 RUN pip install --no-cache-dir \
