@@ -1,0 +1,451 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ipfix-collector-scripts
+  namespace: {{ .Values.ipfix.namespace }}
+data:
+  nfcapd-entrypoint.sh: |
+    #!/bin/sh
+    set -e
+    
+    # Create flow directory
+    mkdir -p /var/lib/ipfix
+    
+    echo "Starting nfcapd on port {{ .Values.ipfix.listenPort }}"
+    echo "Flow directory: /var/lib/ipfix"
+    echo "Rotation interval: {{ .Values.ipfix.rotateSeconds }}s"
+    
+    # Run nfcapd in foreground (no -D flag needed in container)
+    # -w: sync file rotation to next slot (e.g., 5-minute boundaries)
+    # -l: log directory for flow files
+    # -p: UDP port to listen on
+    # -t: rotation interval in seconds
+    # -z: compress rotated files (LZO)
+    # -S 1: subdir hierarchy (none)
+    # -P: PID file
+    # -I: ident string in filenames
+    exec nfcapd \
+      -l /var/lib/ipfix \
+      -p {{ .Values.ipfix.listenPort }} \
+      -t {{ .Values.ipfix.rotateSeconds }} \
+      -w \
+      {{ if .Values.ipfix.compress }}-z{{ end }} \
+      -S 1 \
+      -P /var/run/nfcapd.pid \
+      -I any
+
+  rollup.py: |
+    #!/usr/bin/env python3
+    """
+    IPFIX flow rollup processor.
+    Reads nfcapd binary files, aggregates by VIP/node/hour, inserts to ClickHouse.
+    
+    Features:
+    - Exponential backoff with jitter for ClickHouse retries
+    - Files only moved to processed/ after successful upload
+    - Failed files remain in place for retry on next rollup cycle
+    - Per-file processing to avoid losing data on partial failures
+    """
+    import os
+    import sys
+    import time
+    import glob
+    import random
+    import subprocess
+    import json
+    from datetime import datetime
+    from collections import defaultdict
+    import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
+    # Configuration from environment
+    FLOW_DIR = "/var/lib/ipfix"
+    PROCESSED_DIR = "/var/lib/ipfix/processed"
+    CH_URL = os.getenv("CLICKHOUSE_URL", "http://clickhouse-http.clickhouse.svc.cluster.local:8123")
+    CH_USER = os.getenv("CLICKHOUSE_USER", "writer")
+    CH_PASS = os.getenv("CLICKHOUSE_PASSWORD", "")
+    CH_DB = os.getenv("CLICKHOUSE_DATABASE", "ipfix")
+    CH_TABLE = os.getenv("CLICKHOUSE_TABLE", "vip_hourly_node")
+    NODE_NAME = os.getenv("NODE_NAME", "unknown")
+    VIP_LIST_FILE = os.getenv("VIP_LIST_FILE", "")
+
+    # Retry configuration
+    MAX_RETRIES = 5
+    BASE_DELAY = 1.0  # seconds
+    MAX_DELAY = 60.0  # seconds
+    JITTER_FACTOR = 0.5  # +/- 50% jitter
+
+    # File age threshold (seconds) - skip files still being written
+    MIN_FILE_AGE = 60
+
+
+    def get_delay_with_jitter(attempt: int) -> float:
+        """Calculate exponential backoff delay with jitter."""
+        delay = min(BASE_DELAY * (2 ** attempt), MAX_DELAY)
+        jitter = delay * JITTER_FACTOR * (2 * random.random() - 1)
+        return max(0.1, delay + jitter)
+
+
+    def create_session() -> requests.Session:
+        """Create a requests session with connection pooling."""
+        session = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=1,
+            pool_maxsize=1,
+            max_retries=0  # We handle retries manually for better control
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
+
+
+    def load_vip_list() -> set | None:
+        """Load VIP list from file if configured."""
+        if not VIP_LIST_FILE or not os.path.exists(VIP_LIST_FILE):
+            return None
+        try:
+            with open(VIP_LIST_FILE) as f:
+                vips = set(line.strip() for line in f if line.strip())
+                print(f"Loaded {len(vips)} VIPs from {VIP_LIST_FILE}")
+                return vips
+        except Exception as e:
+            print(f"Warning: Failed to load VIP list: {e}", file=sys.stderr)
+            return None
+
+
+    def parse_nfcapd_file(filepath: str, vip_set: set | None = None) -> dict:
+        """Parse nfcapd file and aggregate flows by hour/VIP/direction."""
+        cmd = ["nfdump", "-r", filepath, "-o", "json", "-q"]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            print(f"Timeout parsing {filepath}", file=sys.stderr)
+            return {}
+
+        if result.returncode != 0:
+            print(f"Error reading {filepath}: {result.stderr}", file=sys.stderr)
+            return {}
+
+        aggregates = defaultdict(lambda: {"bytes": 0, "packets": 0})
+        parse_errors = 0
+
+        for line in result.stdout.strip().split('\n'):
+            if not line:
+                continue
+            try:
+                flow = json.loads(line)
+                src_ip = flow.get("src_ip", "")
+                dst_ip = flow.get("dst_ip", "")
+                bytes_val = int(flow.get("bytes", 0))
+                packets_val = int(flow.get("packets", 0))
+                ts = flow.get("first", 0)
+
+                if ts <= 0:
+                    continue
+
+                # Determine hour bucket
+                hour_ts = datetime.fromtimestamp(ts).replace(minute=0, second=0, microsecond=0)
+
+                # Check if src or dst is a VIP (or process all if no VIP list)
+                for ip, direction in [(src_ip, "from"), (dst_ip, "to")]:
+                    if ip and (vip_set is None or ip in vip_set):
+                        key = (hour_ts, ip, direction)
+                        aggregates[key]["bytes"] += bytes_val
+                        aggregates[key]["packets"] += packets_val
+
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+                parse_errors += 1
+                if parse_errors <= 5:
+                    print(f"Error parsing flow: {e}", file=sys.stderr)
+                continue
+
+        if parse_errors > 5:
+            print(f"... and {parse_errors - 5} more parse errors", file=sys.stderr)
+
+        return dict(aggregates)
+
+
+    def insert_to_clickhouse(session: requests.Session, aggregates: dict) -> bool:
+        """
+        Insert aggregated data to ClickHouse with exponential backoff retry.
+        Returns True on success, False on failure after all retries exhausted.
+        """
+        if not aggregates:
+            return True
+
+        # Build INSERT query
+        values = []
+        for (hour_ts, vip, direction), stats in aggregates.items():
+            # Escape single quotes in VIP (shouldn't happen but be safe)
+            safe_vip = vip.replace("'", "\\'")
+            values.append(
+                f"('{hour_ts.strftime('%Y-%m-%d %H:%M:%S')}', '{safe_vip}', "
+                f"'{direction}', {stats['bytes']}, {stats['packets']}, '{NODE_NAME}')"
+            )
+
+        query = f"INSERT INTO {CH_DB}.{CH_TABLE} (hour_ts, vip, dir, bytes, packets, node) VALUES {','.join(values)}"
+
+        last_error = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = session.post(
+                    CH_URL,
+                    params={"user": CH_USER, "password": CH_PASS},
+                    data=query.encode('utf-8'),
+                    timeout=60
+                )
+                response.raise_for_status()
+                print(f"Inserted {len(aggregates)} aggregates to ClickHouse")
+                return True
+
+            except requests.exceptions.Timeout as e:
+                last_error = e
+                print(f"Timeout on attempt {attempt + 1}/{MAX_RETRIES}: {e}", file=sys.stderr)
+
+            except requests.exceptions.ConnectionError as e:
+                last_error = e
+                print(f"Connection error on attempt {attempt + 1}/{MAX_RETRIES}: {e}", file=sys.stderr)
+
+            except requests.exceptions.HTTPError as e:
+                last_error = e
+                status_code = e.response.status_code if e.response else None
+                print(f"HTTP error {status_code} on attempt {attempt + 1}/{MAX_RETRIES}: {e}", file=sys.stderr)
+
+                # Don't retry on client errors (4xx) except 429 (rate limit)
+                if status_code and 400 <= status_code < 500 and status_code != 429:
+                    print(f"Client error, not retrying", file=sys.stderr)
+                    return False
+
+            except Exception as e:
+                last_error = e
+                print(f"Unexpected error on attempt {attempt + 1}/{MAX_RETRIES}: {e}", file=sys.stderr)
+
+            # Calculate delay and wait before retry (unless this was the last attempt)
+            if attempt < MAX_RETRIES - 1:
+                delay = get_delay_with_jitter(attempt)
+                print(f"Retrying in {delay:.2f}s...")
+                time.sleep(delay)
+
+        print(f"Failed to insert after {MAX_RETRIES} attempts. Last error: {last_error}", file=sys.stderr)
+        return False
+
+
+    def process_single_file(session: requests.Session, filepath: str, vip_set: set | None) -> bool:
+        """
+        Process a single flow file: parse, aggregate, upload to ClickHouse.
+        Returns True if successful (file can be moved), False otherwise.
+        """
+        print(f"Processing {filepath}")
+
+        # Parse the file
+        aggregates = parse_nfcapd_file(filepath, vip_set)
+
+        if not aggregates:
+            print(f"No aggregates from {filepath} (empty or parse failed)")
+            # Consider empty files as "processed" - move them
+            return True
+
+        # Upload to ClickHouse with retries
+        success = insert_to_clickhouse(session, aggregates)
+
+        if success:
+            print(f"Successfully processed {filepath}: {len(aggregates)} aggregates")
+        else:
+            print(f"Failed to upload {filepath}, will retry on next cycle", file=sys.stderr)
+
+        return success
+
+
+    def process_flows():
+        """Main processing function."""
+        os.makedirs(PROCESSED_DIR, exist_ok=True)
+
+        # Load VIP list if configured
+        vip_set = load_vip_list()
+
+        # Find all nfcapd files (excluding current file being written)
+        flow_files = sorted(glob.glob(os.path.join(FLOW_DIR, "nfcapd.*")))
+
+        if not flow_files:
+            print("No flow files to process")
+            return
+
+        # Filter out files that are too recent (still being written)
+        now = time.time()
+        eligible_files = []
+        for filepath in flow_files:
+            try:
+                file_age = now - os.path.getmtime(filepath)
+                if file_age >= MIN_FILE_AGE:
+                    eligible_files.append(filepath)
+                else:
+                    print(f"Skipping {filepath} (age: {file_age:.0f}s < {MIN_FILE_AGE}s)")
+            except OSError as e:
+                print(f"Error checking {filepath}: {e}", file=sys.stderr)
+
+        if not eligible_files:
+            print("No eligible flow files to process")
+            return
+
+        print(f"Processing {len(eligible_files)} flow files")
+
+        # Create session for connection reuse
+        session = create_session()
+
+        success_count = 0
+        fail_count = 0
+
+        for filepath in eligible_files:
+            try:
+                if process_single_file(session, filepath, vip_set):
+                    # Only move to processed after successful upload
+                    dest = os.path.join(PROCESSED_DIR, os.path.basename(filepath))
+                    os.rename(filepath, dest)
+                    print(f"Moved {filepath} -> {dest}")
+                    success_count += 1
+                else:
+                    fail_count += 1
+            except Exception as e:
+                print(f"Unexpected error processing {filepath}: {e}", file=sys.stderr)
+                fail_count += 1
+
+        session.close()
+
+        print(f"Processing complete: {success_count} succeeded, {fail_count} failed")
+        if fail_count > 0:
+            print(f"Failed files will be retried on next rollup cycle")
+
+
+    if __name__ == "__main__":
+        print(f"IPFIX rollup processor starting (node: {NODE_NAME})")
+        print(f"ClickHouse: {CH_URL}, DB: {CH_DB}, Table: {CH_TABLE}")
+        print(f"Retry config: max_retries={MAX_RETRIES}, base_delay={BASE_DELAY}s, max_delay={MAX_DELAY}s")
+        process_flows()
+        print("Processing complete")
+
+  s3-archive.sh: |
+    #!/bin/sh
+    set -e
+    
+    # Archive processed flows to S3
+    PROCESSED_DIR="/var/lib/ipfix/processed"
+    S3_BUCKET="{{ .Values.ipfix.s3.rawBucket }}"
+    S3_PREFIX="{{ .Values.ipfix.s3.prefix }}"
+    
+    if [ ! -d "$PROCESSED_DIR" ]; then
+      echo "No processed directory found"
+      exit 0
+    fi
+    
+    # Find files older than 1 hour
+    find "$PROCESSED_DIR" -name "nfcapd.*" -mmin +60 | while read -r file; do
+      echo "Archiving $file to S3"
+      aws s3 cp "$file" "${S3_BUCKET}/${S3_PREFIX}$(basename $file)" && rm -f "$file"
+    done
+    
+    echo "S3 archival complete"
+
+  ovs-ipfix-config.sh: |
+    #!/bin/sh
+    set -e
+    
+    # OVS IPFIX exporter configuration script
+    # Configures OVS bridge to export IPFIX flows to the local collector
+    # Idempotent: safe to run multiple times without breaking OVS
+    
+    BR="${PROVIDER_BRIDGE:-br-ex}"
+    TARGET="${IPFIX_TARGET:-127.0.0.1:4739}"
+    OBS_DOMAIN="${OBS_DOMAIN_ID:-1001}"
+    CACHE_TIMEOUT="${CACHE_ACTIVE_TIMEOUT:-60}"
+    CACHE_MAX="${CACHE_MAX_FLOWS:-4096}"
+    SAMPLING="${SAMPLING_RATE:-1}"
+    
+    # Generate a unique obs_point_id from node name (deterministic per node)
+    OBS_POINT=$(echo "${NODE_NAME}" | cksum | awk '{print $1 % 100000}')
+    
+    echo "Configuring IPFIX export on bridge ${BR}"
+    echo "  Target: ${TARGET}"
+    echo "  Observation Domain ID: ${OBS_DOMAIN}"
+    echo "  Observation Point ID: ${OBS_POINT} (derived from ${NODE_NAME})"
+    echo "  Cache Active Timeout: ${CACHE_TIMEOUT}s"
+    echo "  Cache Max Flows: ${CACHE_MAX}"
+    echo "  Sampling Rate: 1/${SAMPLING}"
+    
+    # Check if bridge exists
+    if ! ovs-vsctl br-exists "${BR}" 2>/dev/null; then
+      echo "Error: Bridge ${BR} does not exist"
+      echo "Available bridges:"
+      ovs-vsctl list-br
+      exit 1
+    fi
+    
+    # Check current IPFIX configuration
+    CURRENT_IPFIX=$(ovs-vsctl get Bridge "${BR}" ipfix 2>/dev/null || echo "[]")
+    
+    if [ "${CURRENT_IPFIX}" != "[]" ]; then
+      echo "IPFIX already configured on ${BR}, checking if update needed..."
+      
+      # Get current target
+      CURRENT_TARGET=$(ovs-vsctl get IPFIX "${CURRENT_IPFIX}" targets 2>/dev/null | tr -d '[]"' || echo "")
+      
+      if [ "${CURRENT_TARGET}" = "\"${TARGET}\"" ] || [ "${CURRENT_TARGET}" = "${TARGET}" ]; then
+        echo "IPFIX configuration is current, updating parameters..."
+        
+        # Update existing IPFIX entry (idempotent)
+        ovs-vsctl set IPFIX "${CURRENT_IPFIX}" \
+          targets="[\"${TARGET}\"]" \
+          obs_domain_id="${OBS_DOMAIN}" \
+          obs_point_id="${OBS_POINT}" \
+          cache_active_timeout="${CACHE_TIMEOUT}" \
+          cache_max_flows="${CACHE_MAX}" \
+          sampling="${SAMPLING}"
+        
+        echo "IPFIX configuration updated successfully"
+      else
+        echo "IPFIX target changed from ${CURRENT_TARGET} to ${TARGET}, reconfiguring..."
+        
+        # Clear existing and reconfigure
+        ovs-vsctl clear Bridge "${BR}" ipfix
+        ovs-vsctl -- --id=@ipfix create IPFIX \
+          targets="[\"${TARGET}\"]" \
+          obs_domain_id="${OBS_DOMAIN}" \
+          obs_point_id="${OBS_POINT}" \
+          cache_active_timeout="${CACHE_TIMEOUT}" \
+          cache_max_flows="${CACHE_MAX}" \
+          sampling="${SAMPLING}" \
+          -- set Bridge "${BR}" ipfix=@ipfix
+        
+        echo "IPFIX configuration replaced successfully"
+      fi
+    else
+      echo "No existing IPFIX configuration, creating new..."
+      
+      # Create new IPFIX configuration
+      ovs-vsctl -- --id=@ipfix create IPFIX \
+        targets="[\"${TARGET}\"]" \
+        obs_domain_id="${OBS_DOMAIN}" \
+        obs_point_id="${OBS_POINT}" \
+        cache_active_timeout="${CACHE_TIMEOUT}" \
+        cache_max_flows="${CACHE_MAX}" \
+        sampling="${SAMPLING}" \
+        -- set Bridge "${BR}" ipfix=@ipfix
+      
+      echo "IPFIX configuration created successfully"
+    fi
+    
+    # Verify configuration
+    echo ""
+    echo "Current IPFIX configuration:"
+    ovs-vsctl list IPFIX 2>/dev/null || echo "  (none)"
+    
+    echo ""
+    echo "IPFIX exporter configured. Sleeping to keep pod alive..."
+    echo "Pod will reconfigure on restart if needed."
+    
+    # Sleep forever - pod stays running to maintain the configuration
+    # If pod is deleted, OVS config persists until explicitly cleared
+    while true; do
+      sleep 3600
+      echo "$(date): IPFIX exporter still running on ${BR} -> ${TARGET}"
+    done
