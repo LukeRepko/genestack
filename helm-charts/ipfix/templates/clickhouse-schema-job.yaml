@@ -77,7 +77,7 @@ spec:
           
           echo ""
           echo "Creating flows_dist distributed table..."
-          run_query "CREATE TABLE IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.flows_dist ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}' AS {{ .Values.ipfix.clickhouse.database }}.flows_local ENGINE = Distributed('{{ .Values.ipfix.clickhouse.clusterName }}', '{{ .Values.ipfix.clickhouse.database }}', 'flows_local', cityHash64(fip)) SETTINGS internal_replication = 1"
+          run_query "CREATE TABLE IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.flows_dist ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}' AS {{ .Values.ipfix.clickhouse.database }}.flows_local ENGINE = Distributed('{{ .Values.ipfix.clickhouse.clusterName }}', '{{ .Values.ipfix.clickhouse.database }}', 'flows_local', cityHash64(fip))"
           
           echo ""
           echo "Creating flows_by_fip_1h table..."
