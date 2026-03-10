@@ -10,12 +10,22 @@ data:
     
     # Create flow directory
     mkdir -p /var/lib/ipfix
+    mkdir -p /var/lib/ipfix/processed
     
-    echo "Starting nfcapd on port {{ .Values.ipfix.listenPort }}"
+    echo "=== nfcapd configuration ==="
     echo "Flow directory: /var/lib/ipfix"
+    echo "Listen port: {{ .Values.ipfix.listenPort }}"
     echo "Rotation interval: {{ .Values.ipfix.rotateSeconds }}s"
+    echo "Compression: {{ if .Values.ipfix.compress }}LZO{{ else }}none{{ end }}"
+    echo "Ident: any"
+    echo ""
+    echo "File naming convention:"
+    echo "  Active file: nfcapd.current.<pid>"
+    echo "  Rotated files: nfcapd.YYYYMMDDHHmm"
+    echo ""
+    echo "Starting nfcapd with verbose output..."
     
-    # Run nfcapd in foreground
+    # Run nfcapd in foreground with verbose logging
     # nfcapd 1.7.6+ syntax:
     # -w: output directory for flow files
     # -p: UDP port to listen on
@@ -24,6 +34,7 @@ data:
     # -S 1: subdir hierarchy (1 = none)
     # -P: PID file
     # -I: ident string in filenames
+    # -v: verbose (can use multiple times for more verbosity)
     exec nfcapd \
       -w /var/lib/ipfix \
       -p {{ .Values.ipfix.listenPort }} \
@@ -31,7 +42,8 @@ data:
       {{ if .Values.ipfix.compress }}-z=lzo{{ end }} \
       -S 1 \
       -P /var/run/nfcapd.pid \
-      -I any
+      -I any \
+      -v
 
   rollup.py: |
     #!/usr/bin/env python3
@@ -283,11 +295,32 @@ data:
         # Load VIP list if configured
         vip_set = load_vip_list()
 
+        # List all files in flow directory for debugging
+        print(f"=== Scanning {FLOW_DIR} ===")
+        try:
+            all_entries = os.listdir(FLOW_DIR)
+            print(f"All entries in {FLOW_DIR}: {sorted(all_entries)}")
+        except Exception as e:
+            print(f"Error listing {FLOW_DIR}: {e}", file=sys.stderr)
+            return
+
         # Find all nfcapd files (excluding current file being written)
-        flow_files = sorted(glob.glob(os.path.join(FLOW_DIR, "nfcapd.*")))
+        all_files = sorted(glob.glob(os.path.join(FLOW_DIR, "nfcapd.*")))
+        print(f"Files matching nfcapd.*: {[os.path.basename(f) for f in all_files]}")
+        
+        # CRITICAL: Exclude nfcapd.current.* files - these are actively being written by nfcapd
+        # nfcapd will rename these to nfcapd.YYYYMMDDHHmm when rotating
+        # If we move them, nfcapd's rename will fail with "No such file or directory"
+        flow_files = [f for f in all_files if not os.path.basename(f).startswith("nfcapd.current.")]
+        
+        excluded = [os.path.basename(f) for f in all_files if os.path.basename(f).startswith("nfcapd.current.")]
+        if excluded:
+            print(f"Excluding active files (nfcapd.current.*): {excluded}")
+        
+        print(f"Eligible rotated files: {[os.path.basename(f) for f in flow_files]}")
 
         if not flow_files:
-            print("No flow files to process")
+            print("No rotated flow files to process")
             return
 
         # Filter out files that are too recent (still being written)
