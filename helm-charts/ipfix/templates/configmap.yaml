@@ -80,6 +80,7 @@ data:
     CH_TABLE = os.getenv("CLICKHOUSE_TABLE", "vip_hourly_node")
     NODE_NAME = os.getenv("NODE_NAME", "unknown")
     VIP_LIST_FILE = os.getenv("VIP_LIST_FILE", "")
+    NFDUMP_FILTER = os.getenv("NFDUMP_FILTER", "")
 
     # Retry configuration
     MAX_RETRIES = 5
@@ -128,6 +129,12 @@ data:
     def parse_nfcapd_file(filepath: str, vip_set: set | None = None) -> dict:
         """Parse nfcapd file and aggregate flows by hour/VIP/direction."""
         cmd = ["nfdump", "-r", filepath, "-o", "json", "-q"]
+        
+        # Add filter to exclude private IPs if configured
+        if NFDUMP_FILTER:
+            cmd.append(NFDUMP_FILTER)
+            print(f"Applying nfdump filter: {NFDUMP_FILTER}")
+        
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         except subprocess.TimeoutExpired:

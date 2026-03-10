@@ -90,6 +90,8 @@ spec:
           value: {{ .Values.ipfix.clickhouse.database | quote }}
         - name: CLICKHOUSE_TABLE
           value: {{ .Values.ipfix.clickhouse.table | quote }}
+        - name: NFDUMP_FILTER
+          value: {{ .Values.ipfix.nfdumpFilter | quote }}
         {{- if .Values.ipfix.vipListConfigMap }}
         - name: VIP_LIST_FILE
           value: "/etc/vips/vips.txt"

@@ -35,6 +35,11 @@ ipfix:
   # Optional: restrict rollup to known VIPs
   vipListConfigMap: ""
 
+  # nfdump filter to exclude private/internal IPs from rollup
+  # Default excludes RFC1918, CGNAT, and link-local ranges
+  # Set to empty string to disable filtering (collect all flows)
+  nfdumpFilter: "not net 10.0.0.0/8 and not net 172.16.0.0/12 and not net 192.168.0.0/16 and not net 100.64.0.0/10 and not net 169.254.0.0/16"
+
   # S3 archival
   s3:
     enabled: false
