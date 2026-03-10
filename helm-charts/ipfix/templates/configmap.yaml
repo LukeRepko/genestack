@@ -31,7 +31,7 @@ data:
     # -p: UDP port to listen on
     # -t: rotation interval in seconds
     # -z=lzo: compress rotated files with LZO
-    # -S 1: subdir hierarchy (1 = none)
+    # -S 0: no subdirectory hierarchy (flat structure)
     # -P: PID file
     # -I: ident string in filenames
     # -v: verbose (can use multiple times for more verbosity)
@@ -40,7 +40,7 @@ data:
       -p {{ .Values.ipfix.listenPort }} \
       -t {{ .Values.ipfix.rotateSeconds }} \
       {{ if .Values.ipfix.compress }}-z=lzo{{ end }} \
-      -S 1 \
+      -S 0 \
       -P /var/run/nfcapd.pid \
       -I any \
       -v
@@ -140,23 +140,41 @@ data:
 
         aggregates = defaultdict(lambda: {"bytes": 0, "packets": 0})
         parse_errors = 0
+        flow_count = 0
 
         for line in result.stdout.strip().split('\n'):
             if not line:
                 continue
             try:
                 flow = json.loads(line)
-                src_ip = flow.get("src_ip", "")
-                dst_ip = flow.get("dst_ip", "")
-                bytes_val = int(flow.get("bytes", 0))
-                packets_val = int(flow.get("packets", 0))
-                ts = flow.get("first", 0)
-
-                if ts <= 0:
+                
+                # Get IP addresses - nfdump uses src4_addr/dst4_addr for IPv4
+                # and src6_addr/dst6_addr for IPv6
+                src_ip = flow.get("src4_addr") or flow.get("src6_addr") or flow.get("src_ip", "")
+                dst_ip = flow.get("dst4_addr") or flow.get("dst6_addr") or flow.get("dst_ip", "")
+                
+                # Get byte/packet counts - nfdump uses in_bytes/in_packets
+                bytes_val = int(flow.get("in_bytes", 0) or flow.get("bytes", 0))
+                packets_val = int(flow.get("in_packets", 0) or flow.get("packets", 0))
+                
+                # Use 'received' timestamp (when nfcapd got the flow) since OVS
+                # sends relative timestamps in 'first'/'last' that show as 1970 dates
+                # Format: "2026-03-10T19:34:59.905"
+                received_str = flow.get("received", "")
+                if not received_str:
+                    continue
+                
+                try:
+                    # Parse ISO format timestamp, handle milliseconds
+                    if "." in received_str:
+                        received_dt = datetime.strptime(received_str, "%Y-%m-%dT%H:%M:%S.%f")
+                    else:
+                        received_dt = datetime.strptime(received_str, "%Y-%m-%dT%H:%M:%S")
+                except ValueError:
                     continue
 
-                # Determine hour bucket
-                hour_ts = datetime.fromtimestamp(ts).replace(minute=0, second=0, microsecond=0)
+                # Determine hour bucket from received time
+                hour_ts = received_dt.replace(minute=0, second=0, microsecond=0)
 
                 # Check if src or dst is a VIP (or process all if no VIP list)
                 for ip, direction in [(src_ip, "from"), (dst_ip, "to")]:
@@ -164,6 +182,7 @@ data:
                         key = (hour_ts, ip, direction)
                         aggregates[key]["bytes"] += bytes_val
                         aggregates[key]["packets"] += packets_val
+                        flow_count += 1
 
             except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
                 parse_errors += 1
@@ -173,6 +192,9 @@ data:
 
         if parse_errors > 5:
             print(f"... and {parse_errors - 5} more parse errors", file=sys.stderr)
+        
+        if flow_count > 0:
+            print(f"Parsed {flow_count} flow records into {len(aggregates)} aggregates")
 
         return dict(aggregates)
 
