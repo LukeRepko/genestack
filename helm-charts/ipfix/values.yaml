@@ -29,10 +29,6 @@ ipfix:
     # Schema initialization job configuration
     initSchema:
       enabled: true
-      # ClickHouse client image for running schema init
-      image: "clickhouse/clickhouse-client:24.8"
-      # ClickHouse host for native protocol (not HTTP)
-      host: "chi-server-ipfix-0-0.clickhouse.svc.cluster.local"
       # User with CREATE privileges
       user: "writer"
 

@@ -22,134 +22,72 @@ spec:
       restartPolicy: OnFailure
       containers:
       - name: init-schema
-        image: {{ .Values.ipfix.clickhouse.initSchema.image }}
+        image: docker.io/curlimages/curl:8.5.0
         command:
-        - /bin/bash
+        - /bin/sh
         - -c
         - |
           set -e
           echo "=== IPFIX ClickHouse Schema Initialization ==="
-          echo "ClickHouse host: {{ .Values.ipfix.clickhouse.initSchema.host }}"
+          echo "ClickHouse URL: {{ .Values.ipfix.clickhouse.httpUrl }}"
           echo "Cluster name: {{ .Values.ipfix.clickhouse.clusterName }}"
           
+          CH_URL="{{ .Values.ipfix.clickhouse.httpUrl }}"
+          CH_USER="{{ .Values.ipfix.clickhouse.initSchema.user }}"
+          
           echo "Waiting for ClickHouse to be ready..."
-          until clickhouse-client --host {{ .Values.ipfix.clickhouse.initSchema.host }} --query "SELECT 1" 2>/dev/null; do
+          until curl -sf "${CH_URL}/?user=${CH_USER}&password=${CLICKHOUSE_PASSWORD}" -d "SELECT 1" >/dev/null 2>&1; do
             echo "ClickHouse not ready, waiting 5s..."
             sleep 5
           done
           echo "ClickHouse is ready!"
           
-          echo "Initializing IPFIX schema..."
-          clickhouse-client \
-            --host {{ .Values.ipfix.clickhouse.initSchema.host }} \
-            --user {{ .Values.ipfix.clickhouse.initSchema.user }} \
-            --password "$CLICKHOUSE_PASSWORD" \
-            --multiquery <<'EOSQL'
+          run_query() {
+            echo "Running: $1"
+            RESULT=$(curl -sf "${CH_URL}/?user=${CH_USER}&password=${CLICKHOUSE_PASSWORD}" -d "$1" 2>&1) || {
+              echo "Query failed: $RESULT"
+              return 1
+            }
+            [ -n "$RESULT" ] && echo "$RESULT"
+            return 0
+          }
           
-          CREATE DATABASE IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }} ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}';
-
-          ----------------------------------------------------------------------
-          -- Replicated VIP hourly schema (per-node aggregates from rollup.py)
-          ----------------------------------------------------------------------
-          CREATE TABLE IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.{{ .Values.ipfix.clickhouse.table }} ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}'
-          (
-            hour_ts   DateTime,
-            vip       LowCardinality(String),
-            dir       LowCardinality(String),
-            bytes     UInt64,
-            packets   UInt64,
-            node      LowCardinality(String)
-          )
-          ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/{{ .Values.ipfix.clickhouse.table }}','{replica}')
-          PARTITION BY toYYYYMMDD(hour_ts)
-          ORDER BY (hour_ts, vip, dir, node);
-
-          -- Materialized view target for cross-node aggregation
-          CREATE TABLE IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.vip_hourly_mv ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}'
-          (
-            hour_ts   DateTime,
-            vip       LowCardinality(String),
-            dir       LowCardinality(String),
-            bytes     UInt64,
-            packets   UInt64
-          )
-          ENGINE = ReplicatedSummingMergeTree('/clickhouse/tables/{shard}/vip_hourly_mv','{replica}')
-          PARTITION BY toYYYYMMDD(hour_ts)
-          ORDER BY (hour_ts, vip, dir);
-
-          -- MV to aggregate across nodes
-          CREATE MATERIALIZED VIEW IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.vip_hourly_mv__mv ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}'
-          TO {{ .Values.ipfix.clickhouse.database }}.vip_hourly_mv
-          AS
-          SELECT
-            hour_ts,
-            vip,
-            dir,
-            sum(bytes)   AS bytes,
-            sum(packets) AS packets
-          FROM {{ .Values.ipfix.clickhouse.database }}.{{ .Values.ipfix.clickhouse.table }}
-          GROUP BY hour_ts, vip, dir;
-
-          ----------------------------------------------------------------------
-          -- Replicated raw flows + distributed table
-          ----------------------------------------------------------------------
-          CREATE TABLE IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.flows_local ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}'
-          (
-            flow_start   DateTime64(3),
-            flow_end     DateTime64(3),
-            fip          IPv6,
-            src_ip       IPv6,
-            dst_ip       IPv6,
-            src_port     UInt16,
-            dst_port     UInt16,
-            proto        UInt8,
-            bytes        UInt64,
-            packets      UInt64,
-            exporter_id  LowCardinality(String)
-          )
-          ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/flows_local','{replica}')
-          PARTITION BY toDate(flow_start)
-          ORDER BY (fip, flow_start, src_ip, dst_ip, src_port, dst_port, proto)
-          SETTINGS index_granularity = 8192;
-
-          CREATE TABLE IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.flows_dist ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}'
-          AS {{ .Values.ipfix.clickhouse.database }}.flows_local
-          ENGINE = Distributed('{{ .Values.ipfix.clickhouse.clusterName }}', '{{ .Values.ipfix.clickhouse.database }}', 'flows_local', cityHash64(fip))
-          SETTINGS internal_replication = 1;
-
-          -- Hourly rollup by FIP
-          CREATE TABLE IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.flows_by_fip_1h ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}'
-          (
-            ts       DateTime,
-            fip      IPv6,
-            bytes    UInt64,
-            packets  UInt64
-          )
-          ENGINE = SummingMergeTree
-          PARTITION BY toDate(ts)
-          ORDER BY (fip, ts);
-
-          CREATE MATERIALIZED VIEW IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.mv_flows_by_fip_1h ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}'
-          TO {{ .Values.ipfix.clickhouse.database }}.flows_by_fip_1h
-          AS
-          SELECT
-            toStartOfHour(flow_start) AS ts,
-            fip,
-            sum(bytes)   AS bytes,
-            sum(packets) AS packets
-          FROM {{ .Values.ipfix.clickhouse.database }}.flows_local
-          GROUP BY ts, fip;
-
-          EOSQL
+          echo ""
+          echo "Creating database..."
+          run_query "CREATE DATABASE IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }} ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}'"
+          
+          echo ""
+          echo "Creating vip_hourly_node table..."
+          run_query "CREATE TABLE IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.{{ .Values.ipfix.clickhouse.table }} ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}' (hour_ts DateTime, vip LowCardinality(String), dir LowCardinality(String), bytes UInt64, packets UInt64, node LowCardinality(String)) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/{{ .Values.ipfix.clickhouse.table }}','{replica}') PARTITION BY toYYYYMMDD(hour_ts) ORDER BY (hour_ts, vip, dir, node)"
+          
+          echo ""
+          echo "Creating vip_hourly_mv table..."
+          run_query "CREATE TABLE IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.vip_hourly_mv ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}' (hour_ts DateTime, vip LowCardinality(String), dir LowCardinality(String), bytes UInt64, packets UInt64) ENGINE = ReplicatedSummingMergeTree('/clickhouse/tables/{shard}/vip_hourly_mv','{replica}') PARTITION BY toYYYYMMDD(hour_ts) ORDER BY (hour_ts, vip, dir)"
+          
+          echo ""
+          echo "Creating vip_hourly_mv materialized view..."
+          run_query "CREATE MATERIALIZED VIEW IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.vip_hourly_mv__mv ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}' TO {{ .Values.ipfix.clickhouse.database }}.vip_hourly_mv AS SELECT hour_ts, vip, dir, sum(bytes) AS bytes, sum(packets) AS packets FROM {{ .Values.ipfix.clickhouse.database }}.{{ .Values.ipfix.clickhouse.table }} GROUP BY hour_ts, vip, dir"
+          
+          echo ""
+          echo "Creating flows_local table..."
+          run_query "CREATE TABLE IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.flows_local ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}' (flow_start DateTime64(3), flow_end DateTime64(3), fip IPv6, src_ip IPv6, dst_ip IPv6, src_port UInt16, dst_port UInt16, proto UInt8, bytes UInt64, packets UInt64, exporter_id LowCardinality(String)) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/flows_local','{replica}') PARTITION BY toDate(flow_start) ORDER BY (fip, flow_start, src_ip, dst_ip, src_port, dst_port, proto) SETTINGS index_granularity = 8192"
+          
+          echo ""
+          echo "Creating flows_dist distributed table..."
+          run_query "CREATE TABLE IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.flows_dist ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}' AS {{ .Values.ipfix.clickhouse.database }}.flows_local ENGINE = Distributed('{{ .Values.ipfix.clickhouse.clusterName }}', '{{ .Values.ipfix.clickhouse.database }}', 'flows_local', cityHash64(fip)) SETTINGS internal_replication = 1"
+          
+          echo ""
+          echo "Creating flows_by_fip_1h table..."
+          run_query "CREATE TABLE IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.flows_by_fip_1h ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}' (ts DateTime, fip IPv6, bytes UInt64, packets UInt64) ENGINE = SummingMergeTree PARTITION BY toDate(ts) ORDER BY (fip, ts)"
+          
+          echo ""
+          echo "Creating mv_flows_by_fip_1h materialized view..."
+          run_query "CREATE MATERIALIZED VIEW IF NOT EXISTS {{ .Values.ipfix.clickhouse.database }}.mv_flows_by_fip_1h ON CLUSTER '{{ .Values.ipfix.clickhouse.clusterName }}' TO {{ .Values.ipfix.clickhouse.database }}.flows_by_fip_1h AS SELECT toStartOfHour(flow_start) AS ts, fip, sum(bytes) AS bytes, sum(packets) AS packets FROM {{ .Values.ipfix.clickhouse.database }}.flows_local GROUP BY ts, fip"
           
           echo ""
           echo "=== Schema initialization complete! ==="
-          echo "Verifying tables in {{ .Values.ipfix.clickhouse.database }} database..."
-          clickhouse-client \
-            --host {{ .Values.ipfix.clickhouse.initSchema.host }} \
-            --user {{ .Values.ipfix.clickhouse.initSchema.user }} \
-            --password "$CLICKHOUSE_PASSWORD" \
-            --query "SHOW TABLES FROM {{ .Values.ipfix.clickhouse.database }}"
+          echo "Verifying tables..."
+          run_query "SHOW TABLES FROM {{ .Values.ipfix.clickhouse.database }}"
           echo ""
           echo "Done!"
         env:
@@ -160,9 +98,9 @@ spec:
               key: password
         resources:
           requests:
-            cpu: 100m
-            memory: 128Mi
+            cpu: 50m
+            memory: 32Mi
           limits:
-            cpu: 500m
-            memory: 256Mi
+            cpu: 200m
+            memory: 64Mi
 {{- end }}
