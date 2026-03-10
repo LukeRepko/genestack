@@ -142,11 +142,24 @@ data:
         parse_errors = 0
         flow_count = 0
 
-        for line in result.stdout.strip().split('\n'):
-            if not line:
-                continue
+        # nfdump -o json outputs a JSON array, not newline-delimited objects
+        # Parse the entire output as a JSON array
+        try:
+            flows = json.loads(result.stdout)
+            if not isinstance(flows, list):
+                flows = [flows]
+            print(f"Parsed {len(flows)} flow records from JSON")
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse JSON from {filepath}: {e}", file=sys.stderr)
+            print(f"First 500 chars of output: {result.stdout[:500]}", file=sys.stderr)
+            return {}
+
+        for flow in flows:
+                
             try:
-                flow = json.loads(line)
+                # Skip non-flow entries (nfdump may include stat records)
+                if flow.get("type") != "FLOW":
+                    continue
                 
                 # Get IP addresses - nfdump uses src4_addr/dst4_addr for IPv4
                 # and src6_addr/dst6_addr for IPv6
@@ -184,7 +197,7 @@ data:
                         aggregates[key]["packets"] += packets_val
                         flow_count += 1
 
-            except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+            except (KeyError, ValueError, TypeError) as e:
                 parse_errors += 1
                 if parse_errors <= 5:
                     print(f"Error parsing flow: {e}", file=sys.stderr)
