@@ -13,6 +13,9 @@ spec:
     metadata:
       labels:
         app: ipfix-collector
+      annotations:
+        # Force pod restart when configmap or values change
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       nodeSelector:
         {{- range $key, $value := .Values.ipfix.nodeSelector }}
