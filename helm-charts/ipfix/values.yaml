@@ -55,7 +55,9 @@ ipfix:
     # Target for IPFIX export (collector address)
     target: "127.0.0.1:4739"
     # OVS bridge to export from
-    providerBridge: "br-ex"
+    # br-int = integration bridge where VM traffic flows (OVN/kube-ovn)
+    # br-ex = external bridge (typically just north-south traffic)
+    providerBridge: "br-int"
     # IPFIX observation domain ID (identifies this cluster/deployment)
     obsDomainId: 1001
     # How often to export active flows (seconds)
