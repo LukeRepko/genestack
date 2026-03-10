@@ -26,6 +26,12 @@ ipfix:
     # secret name for creds; install script creates if missing
     secretName: "ipfix-clickhouse-creds"
 
+  # OVS bridge to export IPFIX from
+  # br-int = integration bridge where VM traffic flows (OVN/kube-ovn)
+  # br-ex = external bridge (typically just management traffic)
+  ovs:
+    providerBridge: "br-int"
+
   # Optional: restrict rollup to known VIPs
   # (ConfigMap with vips.txt can be added later)
   vipListConfigMap: ""
